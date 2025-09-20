@@ -28,6 +28,30 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    // Add flash dependency
+    const flash_dep = b.dependency("flash", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Add zcrypto dependency for enhanced security
+    const zcrypto_dep = b.dependency("zcrypto", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Add zssh dependency for SSH functionality
+    const zssh_dep = b.dependency("zssh", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Add phantom dependency for TUI interfaces
+    const phantom_dep = b.dependency("phantom", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.addModule("gvault", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -39,6 +63,11 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .imports = &.{
+            .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
+            .{ .name = "zssh", .module = zssh_dep.module("zssh") },
+            .{ .name = "phantom", .module = phantom_dep.module("phantom") },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -57,6 +86,7 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+
     const exe = b.addExecutable(.{
         .name = "gvault",
         .root_module = b.createModule(.{
@@ -79,6 +109,10 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "gvault", .module = mod },
+                .{ .name = "flash", .module = flash_dep.module("flash") },
+                .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
+                .{ .name = "zssh", .module = zssh_dep.module("zssh") },
+                .{ .name = "phantom", .module = phantom_dep.module("phantom") },
             },
         }),
     });
