@@ -2,3 +2,11 @@
 /zig-out/
 *.o
 *.exe
+CLAUDE.md
+DEVELOPMENT_ROADMAP.md
+TODO.md
+archive/ 
+.zig-cache
+zig-out/ 
+TERMIUS_FEAT.md
+archive/

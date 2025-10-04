@@ -52,6 +52,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add zqlite dependency for post-quantum database
+    const zqlite_dep = b.dependency("zqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.addModule("gvault", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -67,6 +73,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
             .{ .name = "zssh", .module = zssh_dep.module("zssh") },
             .{ .name = "phantom", .module = phantom_dep.module("phantom") },
+            .{ .name = "zqlite", .module = zqlite_dep.module("zqlite") },
         },
     });
 
@@ -100,6 +107,7 @@ pub fn build(b: *std.Build) void {
             // definition if desireable (e.g. firmware for embedded devices).
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
@@ -113,6 +121,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
                 .{ .name = "zssh", .module = zssh_dep.module("zssh") },
                 .{ .name = "phantom", .module = phantom_dep.module("phantom") },
+                .{ .name = "zqlite", .module = zqlite_dep.module("zqlite") },
             },
         }),
     });

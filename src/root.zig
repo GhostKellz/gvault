@@ -5,6 +5,13 @@ const std = @import("std");
 const crypto = std.crypto;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+const zcrypto = @import("zcrypto");
+
+// Storage module for persistent database
+const storage = @import("storage.zig");
+
+// Secure memory module for mlock and secure zeroing
+const secure_mem = @import("secure_mem.zig");
 
 pub const GVaultError = error{
     InvalidPassphrase,
@@ -14,12 +21,23 @@ pub const GVaultError = error{
     DecryptionError,
     InvalidCredentialType,
     StorageError,
+    InvalidKDF,
+    SaltGenerationError,
+};
+
+/// Key Derivation Function algorithms supported
+pub const KDFAlgorithm = enum {
+    argon2id, // Recommended - Post-2015 standard (RFC 9106)
+    sha256, // Legacy compatibility
+    sha512, // Legacy compatibility
+    sha3_256, // Modern SHA-3 support
+    sha3_512, // Modern SHA-3 support
 };
 
 /// Credential types supported by GVault
 pub const CredentialType = enum {
-    ssh_key,
-    gpg_key,
+    ssh_key, // ED25519, RSA, ECDSA
+    gpg_key, // RSA, EdDSA
     api_token,
     password,
     certificate,
@@ -59,13 +77,12 @@ pub const CredentialMetadata = struct {
     tags: ArrayList([]const u8),
     server_patterns: ?ArrayList([]const u8),
 
-    pub fn init(allocator: Allocator) CredentialMetadata {
-        _ = allocator; // TODO: Use allocator when we implement persistent storage
+    pub fn init() CredentialMetadata {
         return CredentialMetadata{
             .created = std.time.timestamp(),
             .last_used = null,
             .auto_load = false,
-            .tags = ArrayList([]const u8){},
+            .tags = .{},
             .server_patterns = null,
         };
     }
@@ -98,9 +115,12 @@ pub const Vault = struct {
     allocator: Allocator,
     vault_path: []const u8,
     master_key: ?[32]u8,
+    salt: [32]u8, // Cryptographic salt for KDF
+    kdf_algorithm: KDFAlgorithm,
     credentials: ArrayList(Credential),
     is_locked: bool,
     auto_lock_timeout: ?u32,
+    db: ?*storage.VaultDatabase, // Persistent storage database
 
     pub fn init(allocator: Allocator, vault_path: []const u8) !Vault {
         // Create vault directory if it doesn't exist
@@ -111,13 +131,58 @@ pub const Vault = struct {
             }
         };
 
+        // Generate cryptographic salt
+        var salt: [32]u8 = undefined;
+        crypto.random.bytes(&salt);
+
+        // Initialize database
+        const db_path = try std.fmt.allocPrint(allocator, "{s}/vault.db", .{vault_path});
+        defer allocator.free(db_path);
+
+        const db = try storage.VaultDatabase.init(allocator, db_path);
+
+        // Try to load existing metadata
+        const metadata = try db.loadMetadata();
+        if (metadata) |meta| {
+            // Existing vault - load salt and KDF from database
+            @memcpy(&salt, meta.salt);
+            const kdf = std.meta.stringToEnum(KDFAlgorithm, meta.kdf_algorithm) orelse .argon2id;
+
+            return Vault{
+                .allocator = allocator,
+                .vault_path = try allocator.dupe(u8, vault_path),
+                .master_key = null,
+                .salt = salt,
+                .kdf_algorithm = kdf,
+                .credentials = .{},
+                .is_locked = true,
+                .auto_lock_timeout = if (meta.auto_lock_timeout) |t| @intCast(t) else null,
+                .db = db,
+            };
+        }
+
+        // New vault - save initial metadata
+        var integrity_hash: [32]u8 = undefined;
+        crypto.random.bytes(&integrity_hash);
+
+        try db.upsertMetadata(.{
+            .version = "0.1.0",
+            .kdf_algorithm = @tagName(KDFAlgorithm.argon2id),
+            .salt = &salt,
+            .auto_lock_timeout = null,
+            .integrity_hash = &integrity_hash,
+        });
+
         return Vault{
             .allocator = allocator,
             .vault_path = try allocator.dupe(u8, vault_path),
             .master_key = null,
-            .credentials = ArrayList(Credential){},
+            .salt = salt,
+            .kdf_algorithm = .argon2id, // Default to Argon2id (recommended)
+            .credentials = .{},
             .is_locked = true,
             .auto_lock_timeout = null,
+            .db = db,
         };
     }
 
@@ -128,18 +193,75 @@ pub const Vault = struct {
         }
         self.credentials.deinit(self.allocator);
         self.allocator.free(self.vault_path);
+
+        // Close database connection
+        if (self.db) |db| {
+            db.deinit();
+        }
     }
 
-    /// Unlock the vault with a passphrase
+    /// Unlock the vault with a passphrase using configured KDF algorithm
     pub fn unlock(self: *Vault, passphrase: []const u8) !void {
-        // Simple key derivation for prototype (TODO: use proper KDF)
         var master_key: [32]u8 = undefined;
-        var hasher = crypto.hash.sha2.Sha256.init(.{});
-        hasher.update("gvault_salt");
-        hasher.update(passphrase);
-        hasher.final(&master_key);
+
+        // Derive master key using selected algorithm
+        switch (self.kdf_algorithm) {
+            .argon2id => {
+                // Argon2id - Recommended (RFC 9106)
+                // Memory: 64MB, Time: 3 iterations, Parallelism: 4
+                try crypto.pwhash.argon2.kdf(
+                    self.allocator,
+                    &master_key,
+                    passphrase,
+                    &self.salt,
+                    .{ .t = 3, .m = 65536, .p = 4 },
+                    .argon2id,
+                );
+            },
+            .sha256 => {
+                // SHA-256 - Legacy compatibility
+                var hasher = crypto.hash.sha2.Sha256.init(.{});
+                hasher.update(&self.salt);
+                hasher.update(passphrase);
+                hasher.final(&master_key);
+            },
+            .sha512 => {
+                // SHA-512 - Legacy compatibility
+                var hasher = crypto.hash.sha2.Sha512.init(.{});
+                hasher.update(&self.salt);
+                hasher.update(passphrase);
+                var hash: [64]u8 = undefined;
+                hasher.final(&hash);
+                @memcpy(&master_key, hash[0..32]); // Use first 32 bytes
+            },
+            .sha3_256 => {
+                // SHA3-256 - Modern alternative
+                var hasher = crypto.hash.sha3.Sha3_256.init(.{});
+                hasher.update(&self.salt);
+                hasher.update(passphrase);
+                hasher.final(&master_key);
+            },
+            .sha3_512 => {
+                // SHA3-512 - Modern alternative
+                var hasher = crypto.hash.sha3.Sha3_512.init(.{});
+                hasher.update(&self.salt);
+                hasher.update(passphrase);
+                var hash: [64]u8 = undefined;
+                hasher.final(&hash);
+                @memcpy(&master_key, hash[0..32]); // Use first 32 bytes
+            },
+        }
 
         self.master_key = master_key;
+
+        // Lock master key in memory to prevent swapping to disk
+        if (self.master_key) |*key| {
+            const ptr: [*]u8 = @ptrCast(key);
+            secure_mem.lockMemory(ptr, 32) catch |err| {
+                std.log.warn("Failed to lock master key in memory: {}", .{err});
+            };
+        }
+
         self.is_locked = false;
 
         // Load existing credentials
@@ -149,8 +271,15 @@ pub const Vault = struct {
     /// Lock the vault and clear sensitive data
     pub fn lock(self: *Vault) void {
         if (self.master_key) |*key| {
-            // Securely zero the key memory
-            @memset(key, 0);
+            const ptr: [*]u8 = @ptrCast(key);
+
+            // Unlock memory before zeroing
+            secure_mem.unlockMemory(ptr, 32) catch |err| {
+                std.log.warn("Failed to unlock master key memory: {}", .{err});
+            };
+
+            // Securely zero the key memory using secure_mem module
+            secure_mem.secureZero(ptr, 32);
             self.master_key = null;
         }
 
@@ -171,6 +300,13 @@ pub const Vault = struct {
     /// Set auto-lock timeout in seconds
     pub fn setAutoLock(self: *Vault, timeout_seconds: u32) void {
         self.auto_lock_timeout = timeout_seconds;
+    }
+
+    /// Change KDF algorithm (requires vault to be unlocked)
+    pub fn setKDFAlgorithm(self: *Vault, algorithm: KDFAlgorithm) !void {
+        if (!self.isUnlocked()) return GVaultError.VaultLocked;
+        self.kdf_algorithm = algorithm;
+        try self.saveCredentials(); // Persist the change
     }
 
     /// Encrypt data using ChaCha20-Poly1305
@@ -233,16 +369,119 @@ pub const Vault = struct {
 
     /// Load credentials from storage
     fn loadCredentials(self: *Vault) !void {
-        // For now, this is a placeholder. In a full implementation,
-        // this would read from a secure storage file format
-        _ = self;
+        if (self.db == null) return;
+
+        const db = self.db.?;
+
+        // Load encrypted credentials from database
+        var cred_rows = try db.loadCredentials(self.allocator);
+        defer {
+            for (cred_rows.items) |row| {
+                self.allocator.free(row.credential_type);
+                self.allocator.free(row.name);
+                self.allocator.free(row.username);
+                self.allocator.free(row.password);
+                self.allocator.free(row.nonce);
+                self.allocator.free(row.auth_tag);
+            }
+            cred_rows.deinit(self.allocator);
+        }
+
+        // Decrypt and reconstruct credentials
+        for (cred_rows.items) |row| {
+            // Reconstruct encrypted blob: nonce + ciphertext + tag
+            const encrypted_data = try self.allocator.alloc(u8, row.nonce.len + row.username.len + row.auth_tag.len);
+            @memcpy(encrypted_data[0..row.nonce.len], row.nonce);
+            @memcpy(encrypted_data[row.nonce.len..row.nonce.len + row.username.len], row.username);
+            @memcpy(encrypted_data[row.nonce.len + row.username.len..], row.auth_tag);
+
+            // Parse credential type
+            const cred_type = std.meta.stringToEnum(CredentialType, row.credential_type) orelse .password;
+
+            // Load tags
+            const tags = try db.loadCredentialTags(row.id, self.allocator);
+
+            // Create credential ID from database ID (simplified for now)
+            const id = CredentialId.generate();
+
+            const credential = Credential{
+                .id = id,
+                .name = try self.allocator.dupe(u8, row.name),
+                .type = cred_type,
+                .encrypted_data = encrypted_data,
+                .metadata = .{
+                    .created = row.created_at,
+                    .last_used = row.last_used,
+                    .auto_load = false,
+                    .tags = tags,
+                    .server_patterns = null,
+                },
+            };
+
+            try self.credentials.append(self.allocator, credential);
+        }
+
+        // Log audit event
+        try db.logAudit(.{
+            .event_type = "vault_unlock",
+            .resource_type = null,
+            .resource_id = null,
+            .action = "load_credentials",
+            .result = "success",
+            .details = null,
+            .ip_address = null,
+            .user_agent = null,
+        });
     }
 
     /// Save credentials to storage
     fn saveCredentials(self: *Vault) !void {
-        // For now, this is a placeholder. In a full implementation,
-        // this would save to a secure storage file format
-        _ = self;
+        if (self.db == null) return;
+
+        const db = self.db.?;
+
+        for (self.credentials.items) |cred| {
+            // Extract nonce, ciphertext, and tag from encrypted_data
+            if (cred.encrypted_data.len < 28) continue; // Invalid encrypted data
+
+            const nonce = cred.encrypted_data[0..12];
+            const ciphertext_len = cred.encrypted_data.len - 28; // Total - nonce(12) - tag(16)
+            const ciphertext = cred.encrypted_data[12..12 + ciphertext_len];
+            const tag = cred.encrypted_data[cred.encrypted_data.len - 16..];
+
+            // Save credential row
+            const row = storage.CredentialRow{
+                .id = 0, // Will be set by database
+                .credential_type = @tagName(cred.type),
+                .name = cred.name,
+                .username = ciphertext, // Store ciphertext as username field
+                .password = &[_]u8{}, // Empty for now
+                .nonce = nonce,
+                .auth_tag = tag,
+                .created_at = cred.metadata.created,
+                .modified_at = std.time.timestamp(),
+                .last_used = cred.metadata.last_used,
+            };
+
+            const cred_id = try db.saveCredential(row);
+
+            // Save tags
+            for (cred.metadata.tags.items) |tag_name| {
+                try db.saveCredentialTag(cred_id, tag_name);
+            }
+        }
+
+        // Log audit event
+        try db.logAudit(.{
+            .event_type = "vault_save",
+            .resource_type = null,
+            .resource_id = null,
+            .action = "save_credentials",
+            .result = "success",
+            .details = null,
+            .ip_address = null,
+            .user_agent = null,
+        });
     }
 
     // CRUD Operations for Credentials
@@ -259,7 +498,7 @@ pub const Vault = struct {
             .name = try self.allocator.dupe(u8, name),
             .type = cred_type,
             .encrypted_data = encrypted_data,
-            .metadata = CredentialMetadata.init(self.allocator),
+            .metadata = CredentialMetadata.init(),
         };
 
         try self.credentials.append(self.allocator, credential);
