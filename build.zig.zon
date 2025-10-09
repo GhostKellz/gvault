@@ -45,8 +45,8 @@
             .hash = "zssh-0.1.0-iSaQ5zX_AwDnnuzZlWh0A1UeKc9aki075TJgBEvaGubY",
         },
         .phantom = .{
-            .url = "https://github.com/ghostkellz/phantom/archive/refs/heads/main.tar.gz",
-            .hash = "phantom-0.4.0-E0eWBP5cEQBPR2T7RKXS3Yg25YbimrW3N4zSdVn92Vgh",
+            .url = "https://github.com/ghostkellz/phantom/archive/main.tar.gz",
+            .hash = "phantom-0.4.0-E0eWBP5cEQC_SGOHknfpEnmMbjbu4eYVa6oD5F0B5ELb",
         },
         .flare = .{
             .url = "https://github.com/ghostkellz/flare/archive/refs/heads/main.tar.gz",
