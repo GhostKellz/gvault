@@ -1,7 +1,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const os = std.os;
 
+const posix_mem = switch (builtin.os.tag) {
+    .linux, .freebsd, .openbsd, .netbsd, .dragonfly, .macos => struct {
+        const c = @cImport({
+            @cInclude("sys/mman.h");
+        });
+
+        pub fn mlock(addr: *const anyopaque, len: usize) i32 {
+            return c.mlock(addr, len);
+        }
+
+        pub fn munlock(addr: *const anyopaque, len: usize) i32 {
+            return c.munlock(addr, len);
+        }
+    },
+    else => struct {},
+};
 /// Memory security utilities for sensitive data protection
 /// Implements mlock() to prevent swapping and secure memory zeroing
 
@@ -13,8 +28,8 @@ pub fn lockMemory(ptr: [*]u8, len: usize) !void {
     switch (builtin.os.tag) {
         .linux, .freebsd, .openbsd, .netbsd, .dragonfly, .macos => {
             // Use mlock to prevent swapping
-            const result = std.c.mlock(@ptrCast(@alignCast(ptr)), len);
-            if (result != 0) {
+            const addr = @as(*const anyopaque, @ptrCast(ptr));
+            if (posix_mem.mlock(addr, len) != 0) {
                 return error.MemoryLockFailed;
             }
         },
@@ -40,8 +55,8 @@ pub fn unlockMemory(ptr: [*]u8, len: usize) !void {
 
     switch (builtin.os.tag) {
         .linux, .freebsd, .openbsd, .netbsd, .dragonfly, .macos => {
-            const result = std.c.munlock(@ptrCast(@alignCast(ptr)), len);
-            if (result != 0) {
+            const addr = @as(*const anyopaque, @ptrCast(ptr));
+            if (posix_mem.munlock(addr, len) != 0) {
                 return error.MemoryUnlockFailed;
             }
         },

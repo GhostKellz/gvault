@@ -69,11 +69,21 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .link_libc = true,
         .imports = &.{
             .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
             .{ .name = "zssh", .module = zssh_dep.module("zssh") },
             .{ .name = "phantom", .module = phantom_dep.module("phantom") },
             .{ .name = "zqlite", .module = zqlite_dep.module("zqlite") },
+        },
+    });
+
+    const shell_mod = b.addModule("shell_api", .{
+        .root_source_file = b.path("src/shell_api.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "gvault", .module = mod },
         },
     });
 
@@ -122,6 +132,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zssh", .module = zssh_dep.module("zssh") },
                 .{ .name = "phantom", .module = phantom_dep.module("phantom") },
                 .{ .name = "zqlite", .module = zqlite_dep.module("zqlite") },
+                .{ .name = "shell_api", .module = shell_mod },
             },
         }),
     });
@@ -178,12 +189,19 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const shell_tests = b.addTest(.{
+        .root_module = shell_mod,
+    });
+
+    const run_shell_tests = b.addRunArtifact(shell_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_shell_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

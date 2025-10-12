@@ -42,7 +42,7 @@
         },
         .zssh = .{
             .url = "https://github.com/ghostkellz/zssh/archive/main.tar.gz",
-            .hash = "zssh-0.1.0-iSaQ5x__AwD4W2KtQyI-0ZJi3uxRG60PhBVtOmPHlXfZ",
+            .hash = "zssh-0.2.0-iSaQ51nTBQCh82SyOydE1Xr1kKNYKldVPBW56KfOXrT_",
         },
         .phantom = .{
             .url = "https://github.com/ghostkellz/phantom/archive/main.tar.gz",
