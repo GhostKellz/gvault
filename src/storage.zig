@@ -272,6 +272,12 @@ pub const VaultDatabase = struct {
     }
 
     pub fn deleteCredential(self: *VaultDatabase, credential_id: i64) !void {
+        var stmt_ssh_meta = try self.conn.prepare("DELETE FROM ssh_key_metadata WHERE credential_id = ?");
+        defer stmt_ssh_meta.deinit();
+        try stmt_ssh_meta.bind(0, credential_id);
+        var ssh_meta_result = try stmt_ssh_meta.execute(self.conn);
+        defer ssh_meta_result.deinit();
+
         var stmt_api_meta = try self.conn.prepare("DELETE FROM api_key_metadata WHERE credential_id = ?");
         defer stmt_api_meta.deinit();
         try stmt_api_meta.bind(0, credential_id);
@@ -530,6 +536,131 @@ pub const VaultDatabase = struct {
         return next_id;
     }
 
+    // SSH Key Metadata Storage Functions
+
+    pub fn saveSshKeyMetadata(
+        self: *VaultDatabase,
+        credential_id: i64,
+        algorithm: []const u8,
+        fingerprint: []const u8,
+        comment: ?[]const u8,
+        public_key_data: []const u8,
+        last_rotated: ?i64,
+    ) !i64 {
+        var stmt = try self.conn.prepare(
+            \\INSERT INTO ssh_key_metadata (credential_id, algorithm, fingerprint, comment, public_key_data, last_rotated)
+            \\VALUES (?, ?, ?, ?, ?, ?)
+            \\ON CONFLICT(credential_id) DO UPDATE SET
+            \\  algorithm = excluded.algorithm,
+            \\  fingerprint = excluded.fingerprint,
+            \\  comment = excluded.comment,
+            \\  public_key_data = excluded.public_key_data,
+            \\  last_rotated = excluded.last_rotated
+        );
+        defer stmt.deinit();
+
+        try stmt.bind(0, credential_id);
+        try stmt.bind(1, algorithm);
+        try stmt.bind(2, fingerprint);
+
+        if (comment) |c| {
+            try stmt.bind(3, c);
+        } else {
+            try stmt.bindNull(3);
+        }
+
+        try stmt.bind(4, public_key_data);
+
+        if (last_rotated) |lr| {
+            try stmt.bind(5, lr);
+        } else {
+            try stmt.bindNull(5);
+        }
+
+        var exec_result = try stmt.execute(self.conn);
+        defer exec_result.deinit();
+
+        return credential_id;
+    }
+
+    pub fn loadSshKeyMetadata(
+        self: *VaultDatabase,
+        credential_id: i64,
+        allocator: Allocator,
+    ) !?SshKeyMetadataRow {
+        const sql = try std.fmt.allocPrint(
+            self.allocator,
+            "SELECT id, algorithm, fingerprint, comment, public_key_data, last_rotated FROM ssh_key_metadata WHERE credential_id = {d}",
+            .{credential_id},
+        );
+        defer self.allocator.free(sql);
+
+        var result = try self.conn.query(sql);
+        defer result.deinit();
+
+        if (result.next()) |row_value| {
+            var row = row_value;
+            defer row.deinit();
+
+            const id = row.getInt(0) orelse 0;
+            const algorithm = row.getText(1) orelse return null;
+            const fingerprint = row.getText(2) orelse return null;
+            const comment_txt = row.getText(3);
+            const public_key_data = row.getText(4) orelse return null;
+            const last_rotated = if (!row.isNull(5)) row.getInt(5) else null;
+
+            return SshKeyMetadataRow{
+                .id = id,
+                .credential_id = credential_id,
+                .algorithm = try allocator.dupe(u8, algorithm),
+                .fingerprint = try allocator.dupe(u8, fingerprint),
+                .comment = if (comment_txt) |c| try allocator.dupe(u8, c) else null,
+                .public_key_data = try allocator.dupe(u8, public_key_data),
+                .last_rotated = last_rotated,
+            };
+        }
+
+        return null;
+    }
+
+    pub fn loadAllSshKeys(
+        self: *VaultDatabase,
+        allocator: Allocator,
+    ) !ArrayList(SshKeyMetadataRow) {
+        var keys = ArrayList(SshKeyMetadataRow){};
+        errdefer keys.deinit(allocator);
+
+        var result = try self.conn.query(
+            "SELECT id, credential_id, algorithm, fingerprint, comment, public_key_data, last_rotated FROM ssh_key_metadata ORDER BY id",
+        );
+        defer result.deinit();
+
+        while (result.next()) |row_value| {
+            var row = row_value;
+            defer row.deinit();
+
+            const id = row.getInt(0) orelse 0;
+            const credential_id = row.getInt(1) orelse 0;
+            const algorithm = row.getText(2) orelse continue;
+            const fingerprint = row.getText(3) orelse continue;
+            const comment_txt = row.getText(4);
+            const public_key_data = row.getText(5) orelse continue;
+            const last_rotated = if (!row.isNull(6)) row.getInt(6) else null;
+
+            try keys.append(allocator, .{
+                .id = id,
+                .credential_id = credential_id,
+                .algorithm = try allocator.dupe(u8, algorithm),
+                .fingerprint = try allocator.dupe(u8, fingerprint),
+                .comment = if (comment_txt) |c| try allocator.dupe(u8, c) else null,
+                .public_key_data = try allocator.dupe(u8, public_key_data),
+                .last_rotated = last_rotated,
+            });
+        }
+
+        return keys;
+    }
+
     fn computeNextId(self: *VaultDatabase, table_name: []const u8) !i64 {
         const sql = try std.fmt.allocPrint(self.allocator, "SELECT id FROM {s} ORDER BY id DESC LIMIT 1", .{table_name});
         defer self.allocator.free(sql);
@@ -691,9 +822,10 @@ pub const VaultDatabase = struct {
             "CREATE TABLE IF NOT EXISTS credential_tags (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL,\n" ++ "  tag TEXT NOT NULL,\n" ++ "  UNIQUE(credential_id, tag)\n" ++ ");",
             "CREATE TABLE IF NOT EXISTS server_patterns (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  name TEXT NOT NULL,\n" ++ "  hostname TEXT NOT NULL,\n" ++ "  port INTEGER NOT NULL,\n" ++ "  protocol TEXT NOT NULL,\n" ++ "  credential_id INTEGER,\n" ++ "  jump_host_id INTEGER,\n" ++ "  created_at INTEGER NOT NULL,\n" ++ "  modified_at INTEGER NOT NULL\n" ++ ");",
             "CREATE TABLE IF NOT EXISTS audit_log (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  event_type TEXT NOT NULL,\n" ++ "  resource_type TEXT,\n" ++ "  resource_id INTEGER,\n" ++ "  action TEXT NOT NULL,\n" ++ "  result TEXT NOT NULL,\n" ++ "  details TEXT,\n" ++ "  ip_address TEXT,\n" ++ "  user_agent TEXT,\n" ++ "  created_at INTEGER NOT NULL\n" ++ ");",
-            "CREATE TABLE IF NOT EXISTS api_key_metadata (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL UNIQUE,\n" ++ "  provider TEXT NOT NULL,\n" ++ "  expires_at INTEGER,\n" ++ "  last_rotated INTEGER,\n" ++ "  rotation_days INTEGER,\n" ++ "  project_id TEXT,\n" ++ "  region TEXT,\n" ++ "  environment TEXT,\n" ++ "  notes TEXT,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE CASCADE\n" ++ ");",
-            "CREATE TABLE IF NOT EXISTS api_key_scopes (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  api_key_metadata_id INTEGER NOT NULL,\n" ++ "  scope TEXT NOT NULL,\n" ++ "  FOREIGN KEY(api_key_metadata_id) REFERENCES api_key_metadata(id) ON DELETE CASCADE\n" ++ ");",
-            "CREATE TABLE IF NOT EXISTS api_key_fields (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL,\n" ++ "  field_name TEXT NOT NULL,\n" ++ "  field_value TEXT NOT NULL,\n" ++ "  env_var TEXT,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE CASCADE\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS api_key_metadata (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL UNIQUE,\n" ++ "  provider TEXT NOT NULL,\n" ++ "  expires_at INTEGER,\n" ++ "  last_rotated INTEGER,\n" ++ "  rotation_days INTEGER,\n" ++ "  project_id TEXT,\n" ++ "  region TEXT,\n" ++ "  environment TEXT,\n" ++ "  notes TEXT,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id)\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS api_key_scopes (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  api_key_metadata_id INTEGER NOT NULL,\n" ++ "  scope TEXT NOT NULL,\n" ++ "  FOREIGN KEY(api_key_metadata_id) REFERENCES api_key_metadata(id)\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS api_key_fields (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL,\n" ++ "  field_name TEXT NOT NULL,\n" ++ "  field_value TEXT NOT NULL,\n" ++ "  env_var TEXT,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id)\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS ssh_key_metadata (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL UNIQUE,\n" ++ "  algorithm TEXT NOT NULL,\n" ++ "  fingerprint TEXT NOT NULL,\n" ++ "  comment TEXT,\n" ++ "  public_key_data TEXT NOT NULL,\n" ++ "  last_rotated INTEGER,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id)\n" ++ ");",
         };
 
         self.conn.execute("BEGIN IMMEDIATE;") catch |err| {
@@ -798,6 +930,23 @@ pub const ApiKeyFieldRow = struct {
         allocator.free(self.field_name);
         allocator.free(self.field_value);
         if (self.env_var) |ev| allocator.free(ev);
+    }
+};
+
+pub const SshKeyMetadataRow = struct {
+    id: i64,
+    credential_id: i64,
+    algorithm: []const u8,
+    fingerprint: []const u8,
+    comment: ?[]const u8,
+    public_key_data: []const u8,
+    last_rotated: ?i64,
+
+    pub fn deinit(self: *SshKeyMetadataRow, allocator: Allocator) void {
+        allocator.free(self.algorithm);
+        allocator.free(self.fingerprint);
+        if (self.comment) |c| allocator.free(c);
+        allocator.free(self.public_key_data);
     }
 };
 

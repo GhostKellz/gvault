@@ -5,6 +5,7 @@ const std = @import("std");
 const flash = @import("flash");
 const gvault_lib = @import("gvault");
 const api_cli = @import("api_cli.zig");
+const ssh_cli = @import("ssh_cli.zig");
 
 pub var global_vault: ?gvault_lib.Vault = null;
 pub var global_allocator: std.mem.Allocator = undefined;
@@ -362,6 +363,72 @@ pub fn createCLI(allocator: std.mem.Allocator) !void {
         .about("List available API key providers and their fields")
         .handler(api_cli.listProvidersHandler);
 
+    // SSH Key commands
+    const ssh_keygen_cmd = flash.chain("ssh-keygen")
+        .about("Generate a new SSH key pair")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name for the SSH key")
+                .setRequired()),
+            flash.arg("algorithm", (flash.ArgumentConfig{})
+                .withHelp("Algorithm (ssh-ed25519, ecdsa-sha2-nistp256)")
+                .withDefault(flash.ArgValue{ .string = "ssh-ed25519" })),
+            flash.arg("comment", (flash.ArgumentConfig{})
+                .withHelp("Comment for the key (defaults to name)")),
+        })
+        .handler(ssh_cli.sshKeygenHandler);
+
+    const ssh_list_cmd = flash.chain("ssh-list")
+        .about("List SSH keys in the vault")
+        .flags(&.{
+            flash.flag("verbose", (flash.FlagConfig{})
+                .withShort('v')
+                .withHelp("Show detailed information")),
+        })
+        .handler(ssh_cli.sshListHandler);
+
+    const ssh_export_cmd = flash.chain("ssh-export")
+        .about("Export SSH public key")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name of the SSH key to export")
+                .setRequired()),
+            flash.arg("format", (flash.ArgumentConfig{})
+                .withHelp("Export format (openssh)")
+                .withDefault(flash.ArgValue{ .string = "openssh" })),
+            flash.arg("output", (flash.ArgumentConfig{})
+                .withHelp("Output file path (stdout if not specified)")),
+        })
+        .handler(ssh_cli.sshExportHandler);
+
+    const ssh_import_cmd = flash.chain("ssh-import")
+        .about("Import an existing SSH key")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name for the imported SSH key")
+                .setRequired()),
+            flash.arg("path", (flash.ArgumentConfig{})
+                .withHelp("Path to private key file")
+                .setRequired()),
+            flash.arg("comment", (flash.ArgumentConfig{})
+                .withHelp("Comment for the key (defaults to name)")),
+        })
+        .handler(ssh_cli.sshImportHandler);
+
+    const ssh_delete_cmd = flash.chain("ssh-delete")
+        .about("Delete an SSH key from the vault")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name of the SSH key to delete")
+                .setRequired()),
+        })
+        .flags(&.{
+            flash.flag("confirm", (flash.FlagConfig{})
+                .withShort('y')
+                .withHelp("Confirm deletion without prompting")),
+        })
+        .handler(ssh_cli.sshDeleteHandler);
+
     // Vault management commands
     const init_cmd = flash.chain("init")
         .about("Initialize a new vault with master passphrase")
@@ -490,6 +557,11 @@ pub fn createCLI(allocator: std.mem.Allocator) !void {
             api_export_cmd,
             api_rotate_cmd,
             api_providers_cmd,
+            ssh_keygen_cmd,
+            ssh_list_cmd,
+            ssh_export_cmd,
+            ssh_import_cmd,
+            ssh_delete_cmd,
             status_cmd,
             test_cmd,
         })
@@ -528,17 +600,23 @@ fn defaultHandler(ctx: flash.Context) flash.Error!void {
     std.debug.print("  gvault unlock <passphrase>   Unlock your vault\n", .{});
     std.debug.print("  gvault add <name> <data>     Add a credential\n", .{});
     std.debug.print("  gvault list                  Show all credentials\n", .{});
-    std.debug.print("  gvault api                   API key management\n", .{});
+    std.debug.print("  gvault api-*                 API key management\n", .{});
+    std.debug.print("  gvault ssh-*                 SSH key management\n", .{});
     std.debug.print("  gvault status                Show vault status\n", .{});
 
-    std.debug.print("\nExamples:\n", .{});
-    std.debug.print("  gvault api add github-token ghp_xxx --provider=github\n", .{});
-    std.debug.print("  gvault api list --expiring-soon\n", .{});
-    std.debug.print("  gvault api export my-key --format=env\n", .{});
-    std.debug.print("  gvault add prod-server ~/.ssh/id_ed25519 --type=ssh_key\n", .{});
-    std.debug.print("  gvault search github\n", .{});
+    std.debug.print("\nAPI Key Examples:\n", .{});
+    std.debug.print("  gvault api-add github-token ghp_xxx --provider=github\n", .{});
+    std.debug.print("  gvault api-list --expiring-soon\n", .{});
+    std.debug.print("  gvault api-export my-key --format=env\n", .{});
+
+    std.debug.print("\nSSH Key Examples:\n", .{});
+    std.debug.print("  gvault ssh-keygen prod-server --algorithm=ssh-ed25519\n", .{});
+    std.debug.print("  gvault ssh-list --verbose\n", .{});
+    std.debug.print("  gvault ssh-export prod-server --output=~/.ssh/id_ed25519.pub\n", .{});
+    std.debug.print("  gvault ssh-import my-key --path=~/.ssh/id_ed25519\n", .{});
 
     std.debug.print("\n🚀 Features:\n", .{});
+    std.debug.print("  ✅ SSH key generation (Ed25519, ECDSA) and storage\n", .{});
     std.debug.print("  ✅ API key secrets management with expiration tracking\n", .{});
     std.debug.print("  ✅ Export to ENV, JSON, .env, YAML formats\n", .{});
     std.debug.print("  ✅ Multi-provider templates (AWS, GitHub, Stripe, OpenAI, etc.)\n", .{});
@@ -546,6 +624,6 @@ fn defaultHandler(ctx: flash.Context) flash.Error!void {
     std.debug.print("  🔨 SSH Agent Protocol (coming soon)\n", .{});
     std.debug.print("  🔨 GPG key integration (coming soon)\n", .{});
 
-    std.debug.print("\nRun 'gvault help' or 'gvault api help' for full command reference.\n", .{});
+    std.debug.print("\nRun 'gvault help' for full command reference.\n", .{});
     _ = ctx;
 }
