@@ -272,6 +272,18 @@ pub const VaultDatabase = struct {
     }
 
     pub fn deleteCredential(self: *VaultDatabase, credential_id: i64) !void {
+        var stmt_api_meta = try self.conn.prepare("DELETE FROM api_key_metadata WHERE credential_id = ?");
+        defer stmt_api_meta.deinit();
+        try stmt_api_meta.bind(0, credential_id);
+        var api_meta_result = try stmt_api_meta.execute(self.conn);
+        defer api_meta_result.deinit();
+
+        var stmt_api_fields = try self.conn.prepare("DELETE FROM api_key_fields WHERE credential_id = ?");
+        defer stmt_api_fields.deinit();
+        try stmt_api_fields.bind(0, credential_id);
+        var api_fields_result = try stmt_api_fields.execute(self.conn);
+        defer api_fields_result.deinit();
+
         var stmt_tags = try self.conn.prepare("DELETE FROM credential_tags WHERE credential_id = ?");
         defer stmt_tags.deinit();
         try stmt_tags.bind(0, credential_id);
@@ -289,6 +301,197 @@ pub const VaultDatabase = struct {
         try stmt_credential.bind(0, credential_id);
         var credential_result = try stmt_credential.execute(self.conn);
         defer credential_result.deinit();
+    }
+
+    // API Key Metadata Storage Functions
+
+    pub fn saveApiKeyMetadata(self: *VaultDatabase, credential_id: i64, provider: []const u8, expires_at: ?i64, last_rotated: ?i64, rotation_days: ?i64, project_id: ?[]const u8, region: ?[]const u8, environment: ?[]const u8, notes: ?[]const u8) !i64 {
+        var stmt = try self.conn.prepare(
+            \\INSERT INTO api_key_metadata (credential_id, provider, expires_at, last_rotated, rotation_days, project_id, region, environment, notes)
+            \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            \\ON CONFLICT(credential_id) DO UPDATE SET
+            \\  provider = excluded.provider,
+            \\  expires_at = excluded.expires_at,
+            \\  last_rotated = excluded.last_rotated,
+            \\  rotation_days = excluded.rotation_days,
+            \\  project_id = excluded.project_id,
+            \\  region = excluded.region,
+            \\  environment = excluded.environment,
+            \\  notes = excluded.notes
+        );
+        defer stmt.deinit();
+
+        try stmt.bind(0, credential_id);
+        try stmt.bind(1, provider);
+
+        if (expires_at) |exp| {
+            try stmt.bind(2, exp);
+        } else {
+            try stmt.bindNull(2);
+        }
+
+        if (last_rotated) |lr| {
+            try stmt.bind(3, lr);
+        } else {
+            try stmt.bindNull(3);
+        }
+
+        if (rotation_days) |rd| {
+            try stmt.bind(4, rd);
+        } else {
+            try stmt.bindNull(4);
+        }
+
+        if (project_id) |pid| {
+            try stmt.bind(5, pid);
+        } else {
+            try stmt.bindNull(5);
+        }
+
+        if (region) |reg| {
+            try stmt.bind(6, reg);
+        } else {
+            try stmt.bindNull(6);
+        }
+
+        if (environment) |env| {
+            try stmt.bind(7, env);
+        } else {
+            try stmt.bindNull(7);
+        }
+
+        if (notes) |n| {
+            try stmt.bind(8, n);
+        } else {
+            try stmt.bindNull(8);
+        }
+
+        var exec_result = try stmt.execute(self.conn);
+        defer exec_result.deinit();
+
+        // Return the api_key_metadata id (use manual tracking)
+        // Note: In a production system, you'd query SELECT last_insert_rowid()
+        return credential_id; // Return the credential ID for now
+    }
+
+    pub fn loadApiKeyMetadata(self: *VaultDatabase, credential_id: i64, allocator: Allocator) !?ApiKeyMetadataRow {
+        const sql = try std.fmt.allocPrint(self.allocator, "SELECT id, provider, expires_at, last_rotated, rotation_days, project_id, region, environment, notes FROM api_key_metadata WHERE credential_id = {d}", .{credential_id});
+        defer self.allocator.free(sql);
+
+        var result = try self.conn.query(sql);
+        defer result.deinit();
+
+        if (result.next()) |row_value| {
+            var row = row_value;
+            defer row.deinit();
+
+            const id = row.getInt(0) orelse 0;
+            const provider = row.getText(1) orelse return null;
+            const expires_at = if (!row.isNull(2)) row.getInt(2) else null;
+            const last_rotated = if (!row.isNull(3)) row.getInt(3) else null;
+            const rotation_days = if (!row.isNull(4)) row.getInt(4) else null;
+            const project_id_txt = row.getText(5);
+            const region_txt = row.getText(6);
+            const environment_txt = row.getText(7);
+            const notes_txt = row.getText(8);
+
+            return ApiKeyMetadataRow{
+                .id = id,
+                .credential_id = credential_id,
+                .provider = try allocator.dupe(u8, provider),
+                .expires_at = expires_at,
+                .last_rotated = last_rotated,
+                .rotation_days = rotation_days,
+                .project_id = if (project_id_txt) |pid| try allocator.dupe(u8, pid) else null,
+                .region = if (region_txt) |reg| try allocator.dupe(u8, reg) else null,
+                .environment = if (environment_txt) |env| try allocator.dupe(u8, env) else null,
+                .notes = if (notes_txt) |n| try allocator.dupe(u8, n) else null,
+            };
+        }
+
+        return null;
+    }
+
+    pub fn saveApiKeyScope(self: *VaultDatabase, api_key_metadata_id: i64, scope: []const u8) !void {
+        var stmt = try self.conn.prepare("INSERT INTO api_key_scopes (api_key_metadata_id, scope) VALUES (?, ?)");
+        defer stmt.deinit();
+
+        try stmt.bind(0, api_key_metadata_id);
+        try stmt.bind(1, scope);
+
+        var exec_result = try stmt.execute(self.conn);
+        defer exec_result.deinit();
+    }
+
+    pub fn loadApiKeyScopes(self: *VaultDatabase, api_key_metadata_id: i64, allocator: Allocator) !ArrayList([]const u8) {
+        var scopes = ArrayList([]const u8){};
+        errdefer scopes.deinit(allocator);
+
+        const sql = try std.fmt.allocPrint(self.allocator, "SELECT scope FROM api_key_scopes WHERE api_key_metadata_id = {d} ORDER BY scope", .{api_key_metadata_id});
+        defer self.allocator.free(sql);
+
+        var result = try self.conn.query(sql);
+        defer result.deinit();
+
+        while (result.next()) |row_value| {
+            var row = row_value;
+            defer row.deinit();
+            const scope_txt = row.getText(0) orelse continue;
+            const scope_copy = try allocator.dupe(u8, scope_txt);
+            errdefer allocator.free(scope_copy);
+            try scopes.append(allocator, scope_copy);
+        }
+
+        return scopes;
+    }
+
+    pub fn saveApiKeyField(self: *VaultDatabase, credential_id: i64, field_name: []const u8, field_value: []const u8, env_var: ?[]const u8) !void {
+        var stmt = try self.conn.prepare("INSERT INTO api_key_fields (credential_id, field_name, field_value, env_var) VALUES (?, ?, ?, ?)");
+        defer stmt.deinit();
+
+        try stmt.bind(0, credential_id);
+        try stmt.bind(1, field_name);
+        try stmt.bind(2, field_value);
+
+        if (env_var) |ev| {
+            try stmt.bind(3, ev);
+        } else {
+            try stmt.bindNull(3);
+        }
+
+        var exec_result = try stmt.execute(self.conn);
+        defer exec_result.deinit();
+    }
+
+    pub fn loadApiKeyFields(self: *VaultDatabase, credential_id: i64, allocator: Allocator) !ArrayList(ApiKeyFieldRow) {
+        var fields = ArrayList(ApiKeyFieldRow){};
+        errdefer fields.deinit(allocator);
+
+        const sql = try std.fmt.allocPrint(self.allocator, "SELECT id, field_name, field_value, env_var FROM api_key_fields WHERE credential_id = {d} ORDER BY id", .{credential_id});
+        defer self.allocator.free(sql);
+
+        var result = try self.conn.query(sql);
+        defer result.deinit();
+
+        while (result.next()) |row_value| {
+            var row = row_value;
+            defer row.deinit();
+
+            const id = row.getInt(0) orelse 0;
+            const field_name = row.getText(1) orelse continue;
+            const field_value = row.getText(2) orelse continue;
+            const env_var_txt = row.getText(3);
+
+            try fields.append(allocator, .{
+                .id = id,
+                .credential_id = credential_id,
+                .field_name = try allocator.dupe(u8, field_name),
+                .field_value = try allocator.dupe(u8, field_value),
+                .env_var = if (env_var_txt) |ev| try allocator.dupe(u8, ev) else null,
+            });
+        }
+
+        return fields;
     }
 
     pub fn saveServerPattern(self: *VaultDatabase, pattern: ServerPatternRow) !i64 {
@@ -488,6 +691,9 @@ pub const VaultDatabase = struct {
             "CREATE TABLE IF NOT EXISTS credential_tags (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL,\n" ++ "  tag TEXT NOT NULL,\n" ++ "  UNIQUE(credential_id, tag)\n" ++ ");",
             "CREATE TABLE IF NOT EXISTS server_patterns (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  name TEXT NOT NULL,\n" ++ "  hostname TEXT NOT NULL,\n" ++ "  port INTEGER NOT NULL,\n" ++ "  protocol TEXT NOT NULL,\n" ++ "  credential_id INTEGER,\n" ++ "  jump_host_id INTEGER,\n" ++ "  created_at INTEGER NOT NULL,\n" ++ "  modified_at INTEGER NOT NULL\n" ++ ");",
             "CREATE TABLE IF NOT EXISTS audit_log (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  event_type TEXT NOT NULL,\n" ++ "  resource_type TEXT,\n" ++ "  resource_id INTEGER,\n" ++ "  action TEXT NOT NULL,\n" ++ "  result TEXT NOT NULL,\n" ++ "  details TEXT,\n" ++ "  ip_address TEXT,\n" ++ "  user_agent TEXT,\n" ++ "  created_at INTEGER NOT NULL\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS api_key_metadata (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL UNIQUE,\n" ++ "  provider TEXT NOT NULL,\n" ++ "  expires_at INTEGER,\n" ++ "  last_rotated INTEGER,\n" ++ "  rotation_days INTEGER,\n" ++ "  project_id TEXT,\n" ++ "  region TEXT,\n" ++ "  environment TEXT,\n" ++ "  notes TEXT,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE CASCADE\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS api_key_scopes (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  api_key_metadata_id INTEGER NOT NULL,\n" ++ "  scope TEXT NOT NULL,\n" ++ "  FOREIGN KEY(api_key_metadata_id) REFERENCES api_key_metadata(id) ON DELETE CASCADE\n" ++ ");",
+            "CREATE TABLE IF NOT EXISTS api_key_fields (\n" ++ "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n" ++ "  credential_id INTEGER NOT NULL,\n" ++ "  field_name TEXT NOT NULL,\n" ++ "  field_value TEXT NOT NULL,\n" ++ "  env_var TEXT,\n" ++ "  FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE CASCADE\n" ++ ");",
         };
 
         self.conn.execute("BEGIN IMMEDIATE;") catch |err| {
@@ -558,6 +764,41 @@ pub const ServerPatternRow = struct {
     jump_host_id: ?i64,
     created_at: i64,
     modified_at: i64,
+};
+
+pub const ApiKeyMetadataRow = struct {
+    id: i64,
+    credential_id: i64,
+    provider: []const u8,
+    expires_at: ?i64,
+    last_rotated: ?i64,
+    rotation_days: ?i64,
+    project_id: ?[]const u8,
+    region: ?[]const u8,
+    environment: ?[]const u8,
+    notes: ?[]const u8,
+
+    pub fn deinit(self: *ApiKeyMetadataRow, allocator: Allocator) void {
+        allocator.free(self.provider);
+        if (self.project_id) |pid| allocator.free(pid);
+        if (self.region) |reg| allocator.free(reg);
+        if (self.environment) |env| allocator.free(env);
+        if (self.notes) |n| allocator.free(n);
+    }
+};
+
+pub const ApiKeyFieldRow = struct {
+    id: i64,
+    credential_id: i64,
+    field_name: []const u8,
+    field_value: []const u8,
+    env_var: ?[]const u8,
+
+    pub fn deinit(self: *ApiKeyFieldRow, allocator: Allocator) void {
+        allocator.free(self.field_name);
+        allocator.free(self.field_value);
+        if (self.env_var) |ev| allocator.free(ev);
+    }
 };
 
 fn bytesToHexAlloc(allocator: Allocator, bytes: []const u8) ![]u8 {

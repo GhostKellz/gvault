@@ -26,6 +26,7 @@ pub const PatternSpec = struct {
 
 // Storage module for persistent database
 const storage = @import("storage.zig");
+pub const Storage = storage;
 
 // Secure memory module for mlock and secure zeroing
 const secure_mem = @import("secure_mem.zig");

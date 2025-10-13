@@ -4,9 +4,10 @@
 const std = @import("std");
 const flash = @import("flash");
 const gvault_lib = @import("gvault");
+const api_cli = @import("api_cli.zig");
 
-var global_vault: ?gvault_lib.Vault = null;
-var global_allocator: std.mem.Allocator = undefined;
+pub var global_vault: ?gvault_lib.Vault = null;
+pub var global_allocator: std.mem.Allocator = undefined;
 
 // CLI Command Handlers
 
@@ -284,6 +285,83 @@ fn credentialTypeToString(cred_type: gvault_lib.CredentialType) []const u8 {
 pub fn createCLI(allocator: std.mem.Allocator) !void {
     global_allocator = allocator;
 
+    // Create API commands using api_cli module (flattened structure)
+    const api_add_cmd = flash.chain("api-add")
+        .about("Add a new API key with provider template")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name for the API key")
+                .setRequired()),
+            flash.arg("key", (flash.ArgumentConfig{})
+                .withHelp("API key value")
+                .setRequired()),
+            flash.arg("provider", (flash.ArgumentConfig{})
+                .withHelp("Provider (aws, github, stripe, openai, etc.)")
+                .withDefault(flash.ArgValue{ .string = "generic" })),
+            flash.arg("env", (flash.ArgumentConfig{})
+                .withHelp("Environment (dev, staging, production)")),
+            flash.arg("project", (flash.ArgumentConfig{})
+                .withHelp("Project ID")),
+            flash.arg("region", (flash.ArgumentConfig{})
+                .withHelp("Region")),
+            flash.arg("expires-in-days", (flash.ArgumentConfig{})
+                .withHelp("Days until expiration")),
+            flash.arg("notes", (flash.ArgumentConfig{})
+                .withHelp("Additional notes")),
+        })
+        .flags(&.{
+            flash.flag("verbose", (flash.FlagConfig{})
+                .withShort('v')
+                .withHelp("Enable verbose output")),
+        })
+        .handler(api_cli.addApiKeyHandler);
+
+    const api_list_cmd = flash.chain("api-list")
+        .about("List API keys with expiration status")
+        .args(&.{
+            flash.arg("provider", (flash.ArgumentConfig{})
+                .withHelp("Filter by provider")),
+        })
+        .flags(&.{
+            flash.flag("verbose", (flash.FlagConfig{})
+                .withShort('v')
+                .withHelp("Show detailed information")),
+            flash.flag("expiring-soon", (flash.FlagConfig{})
+                .withHelp("Show only keys expiring in next 30 days")),
+            flash.flag("expired", (flash.FlagConfig{})
+                .withHelp("Show only expired keys")),
+        })
+        .handler(api_cli.listApiKeysHandler);
+
+    const api_export_cmd = flash.chain("api-export")
+        .about("Export API key in various formats")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name of the API key to export")
+                .setRequired()),
+            flash.arg("format", (flash.ArgumentConfig{})
+                .withHelp("Export format (env, json, dotenv, yaml)")
+                .withDefault(flash.ArgValue{ .string = "env" })),
+            flash.arg("output", (flash.ArgumentConfig{})
+                .withHelp("Output file path (stdout if not specified)")),
+        })
+        .handler(api_cli.exportApiKeyHandler);
+
+    const api_rotate_cmd = flash.chain("api-rotate")
+        .about("Mark API key as rotated and optionally update value")
+        .args(&.{
+            flash.arg("name", (flash.ArgumentConfig{})
+                .withHelp("Name of the API key to rotate")
+                .setRequired()),
+            flash.arg("new-key", (flash.ArgumentConfig{})
+                .withHelp("New API key value (optional)")),
+        })
+        .handler(api_cli.rotateApiKeyHandler);
+
+    const api_providers_cmd = flash.chain("api-providers")
+        .about("List available API key providers and their fields")
+        .handler(api_cli.listProvidersHandler);
+
     // Vault management commands
     const init_cmd = flash.chain("init")
         .about("Initialize a new vault with master passphrase")
@@ -407,12 +485,38 @@ pub fn createCLI(allocator: std.mem.Allocator) !void {
             add_cmd,
             list_cmd,
             search_cmd,
+            api_add_cmd,
+            api_list_cmd,
+            api_export_cmd,
+            api_rotate_cmd,
+            api_providers_cmd,
             status_cmd,
             test_cmd,
         })
         .withHandler(defaultHandler));
 
     try cli.run();
+}
+
+fn defaultApiHandler(ctx: flash.Context) flash.Error!void {
+    std.debug.print("🔑 GVault API Key Manager\n\n", .{});
+    std.debug.print("Specialized management for API keys with expiration tracking and multi-format export\n\n", .{});
+
+    std.debug.print("Commands:\n", .{});
+    std.debug.print("  gvault api add <name> <key> --provider=<provider>  Add new API key\n", .{});
+    std.debug.print("  gvault api list [--expiring-soon] [--expired]      List API keys\n", .{});
+    std.debug.print("  gvault api export <name> [--format=env|json]       Export API key\n", .{});
+    std.debug.print("  gvault api rotate <name> [--new-key=<key>]         Rotate API key\n", .{});
+    std.debug.print("  gvault api providers                               List providers\n", .{});
+
+    std.debug.print("\nExamples:\n", .{});
+    std.debug.print("  gvault api add my-aws-key AKIA... --provider=aws --env=production\n", .{});
+    std.debug.print("  gvault api list --expiring-soon --verbose\n", .{});
+    std.debug.print("  gvault api export my-aws-key --format=env\n", .{});
+    std.debug.print("  gvault api rotate github-token --new-key=ghp_new...\n", .{});
+
+    std.debug.print("\n📚 Run 'gvault api providers' to see all supported providers\n", .{});
+    _ = ctx;
 }
 
 fn defaultHandler(ctx: flash.Context) flash.Error!void {
@@ -424,20 +528,24 @@ fn defaultHandler(ctx: flash.Context) flash.Error!void {
     std.debug.print("  gvault unlock <passphrase>   Unlock your vault\n", .{});
     std.debug.print("  gvault add <name> <data>     Add a credential\n", .{});
     std.debug.print("  gvault list                  Show all credentials\n", .{});
+    std.debug.print("  gvault api                   API key management\n", .{});
     std.debug.print("  gvault status                Show vault status\n", .{});
 
     std.debug.print("\nExamples:\n", .{});
-    std.debug.print("  gvault add github-token ghp_xxx --type=api_token\n", .{});
+    std.debug.print("  gvault api add github-token ghp_xxx --provider=github\n", .{});
+    std.debug.print("  gvault api list --expiring-soon\n", .{});
+    std.debug.print("  gvault api export my-key --format=env\n", .{});
     std.debug.print("  gvault add prod-server ~/.ssh/id_ed25519 --type=ssh_key\n", .{});
     std.debug.print("  gvault search github\n", .{});
-    std.debug.print("  gvault list --type=ssh_key --verbose\n", .{});
 
-    std.debug.print("\n🚀 Future Features:\n", .{});
-    std.debug.print("  • SSH Agent Protocol replacement\n", .{});
-    std.debug.print("  • GPG key integration\n", .{});
-    std.debug.print("  • Hardware security modules\n", .{});
-    std.debug.print("  • Auto-loading for server patterns\n", .{});
+    std.debug.print("\n🚀 Features:\n", .{});
+    std.debug.print("  ✅ API key secrets management with expiration tracking\n", .{});
+    std.debug.print("  ✅ Export to ENV, JSON, .env, YAML formats\n", .{});
+    std.debug.print("  ✅ Multi-provider templates (AWS, GitHub, Stripe, OpenAI, etc.)\n", .{});
+    std.debug.print("  ✅ Rotation warnings and key lifecycle management\n", .{});
+    std.debug.print("  🔨 SSH Agent Protocol (coming soon)\n", .{});
+    std.debug.print("  🔨 GPG key integration (coming soon)\n", .{});
 
-    std.debug.print("\nRun 'gvault help' for full command reference.\n", .{});
+    std.debug.print("\nRun 'gvault help' or 'gvault api help' for full command reference.\n", .{});
     _ = ctx;
 }
